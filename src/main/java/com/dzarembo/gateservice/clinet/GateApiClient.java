@@ -17,6 +17,7 @@ import java.util.Objects;
 @Slf4j
 @Service
 public class GateApiClient {
+
     private final WebClient webClient;
 
     public GateApiClient() {
@@ -38,7 +39,7 @@ public class GateApiClient {
     public Collection<FundingRate> fetchFundingRates() {
         try {
             List<Item> items = webClient.get()
-                    .uri("/futures/usdt/tickers")
+                    .uri("/futures/usdt/contracts")
                     .retrieve()
                     .bodyToFlux(Item.class)
                     .collectList()
@@ -51,10 +52,12 @@ public class GateApiClient {
 
             return items.stream()
                     // 1️⃣ оставляем только пары с USDT
-                    .filter(item -> item.getContract() != null && item.getContract().contains("USDT"))
+                    .filter(item -> item.getName() != null && item.getName().contains("USDT"))
                     // 2️⃣ исключаем USD контракты
-                    .filter(item -> !item.getContract().contains("USD_") && !item.getContract().endsWith("USD"))
-                    // 3️⃣ мапим в FundingRate
+                    .filter(item -> !item.getName().contains("USD_") && !item.getName().endsWith("USD"))
+                    // 3️⃣ пропускаем нулевые ставки
+                    .filter(item -> safeParseDouble(item.getFunding_rate()) != 0.0)
+                    // 4️⃣ мапим в FundingRate
                     .map(this::mapToFundingRate)
                     .filter(Objects::nonNull)
                     .toList();
@@ -67,12 +70,12 @@ public class GateApiClient {
 
     private FundingRate mapToFundingRate(Item item) {
         try {
-            double rate = item.getFunding_rate(); // поле в JSON — funding_rate
+            double rate = safeParseDouble(item.getFunding_rate());
             long nextFundingTimeSec = item.getFunding_next_apply(); // секунды
             long nextFundingTimeMs = nextFundingTimeSec * 1000L;
-            int intervalHours = 8; // фиксированный интервал у Gate
+            int intervalHours = (int) (item.getFunding_interval() / 3600); // сек → часы
 
-            String normalizedSymbol = normalizeSymbol(item.getContract());
+            String normalizedSymbol = normalizeSymbol(item.getName());
 
             log.debug("Gate.io: {} rate={}, nextFundingTime(UTC)={}, interval={}h",
                     normalizedSymbol,
@@ -94,6 +97,14 @@ public class GateApiClient {
         }
     }
 
+    private double safeParseDouble(String value) {
+        try {
+            return (value == null || value.isBlank()) ? 0.0 : Double.parseDouble(value);
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
+
     private String normalizeSymbol(String symbol) {
         return symbol == null ? "" : symbol.replace("_", "");
     }
@@ -102,8 +113,9 @@ public class GateApiClient {
 
     @Data
     public static class Item {
-        private String contract;               // e.g. "BTC_USDT"
-        private double funding_rate;           // e.g. 0.000099
-        private long funding_next_apply;       // e.g. 1761667200 (в секундах)
+        private String name;                  // e.g. "BTC_USDT"
+        private String funding_rate;          // e.g. "0.000099"
+        private long funding_next_apply;      // e.g. 1761667200 (seconds)
+        private long funding_interval;        // e.g. 28800 (seconds)
     }
 }
